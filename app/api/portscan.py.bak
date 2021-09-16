@@ -1,0 +1,123 @@
+# coding=utf-8
+'''
+全端口扫描
+'''
+import sys
+import socket
+import logging
+import requests
+import dns.resolver
+from time import time
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+#线程池
+from multiprocessing.dummy import Pool as ThreadPool
+from multiprocessing.dummy import Lock
+from . import api
+from app.utils import *
+from flask import  request
+
+@api.route('/all_portscan')
+def all_portscan():
+    target = str(request.args.get('target', ''))
+    if target.startswith('http://') or target.startswith('https://'):
+        domain = target.split('/')[2]
+    else:
+        domain = target.split('/')[0]
+    portscan = Scanner(domain)               
+    portscan.check_target()
+	
+
+    # 对端口从小到大排序
+    if len(portscan.arr)>=100:
+        portscan.arr = ["端口开放异常,可能存在防火墙！"]
+    else:
+	    portscan.arr.sort()
+
+    return success(portscan.arr)
+
+class Scanner(object):
+    	# def __init__(self, target, start, end):
+	def __init__(self, target):
+		self.target = target
+		self.start  = 1
+		self.end    = 65535
+		self.time   = time()
+		self.ports  = []
+		self.result = []
+		self.mutex  = Lock()
+		self.get_ports()
+		self.arr = []
+
+	def get_ports(self):
+		for i in range(int(self.start), int(self.end)+1):
+			self.ports.append(i)
+
+	def check_cdn(self):
+		#目标域名cdn检测
+		myResolver = dns.resolver.Resolver()
+		myResolver.lifetime = myResolver.timeout = 2.0
+		dnsserver = [['114.114.114.114'],['8.8.8.8'],['223.6.6.6']]
+		try:
+			for i in dnsserver:
+				myResolver.nameservers = i
+				record = myResolver.query(self.target)
+				self.result.append(record[0].address)
+		except Exception as e:
+			pass
+		finally:
+			return True if len(set(list(self.result))) > 1 else False
+
+	def scan_port(self, port):
+		#端口扫描
+		try:
+			s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+			s.settimeout(1)
+			# s.settimeout(0.2)
+			return True if s.connect_ex((self.target, port)) == 0 else False
+		except Exception as e:
+			pass
+		finally:
+			s.close()
+
+	
+
+	def run(self, port):
+		try:
+			if self.scan_port(port):
+				self.mutex.acquire()
+				self.arr.append(port)
+				self.mutex.release()
+				print(port)
+		except Exception as e:
+			pass
+
+	def _start(self):
+		try:
+			#线程数
+			pool = ThreadPool(processes=200)
+			# get传递超时时间，用于捕捉ctrl+c
+			pool.map_async(self.run, self.ports).get(0xffff)
+			pool.close()
+			pool.join()
+		except Exception as e:
+			print(e)
+		except KeyboardInterrupt:
+			print('[-] 用户终止扫描...')
+			sys.exit(1)
+
+	def check_target(self):
+		#判断目标是域名还是还是ip地址
+		flag = self.target.split('.')[-1]
+		try:
+			#ip地址
+			if int(flag) >= 0:
+				self._start()
+		except:
+			#域名地址
+			if not self.check_cdn():
+				self._start()
+			else:
+				self.arr.append("存在CDN,无法探测！")
+				print('[-] 目标使用了CDN技术,停止扫描')
